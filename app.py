@@ -7,6 +7,7 @@ from flask_cors import CORS
 from PIL import Image, ImageDraw, ImageOps
 from dotenv import load_dotenv
 from openai import OpenAI
+from groq import Groq  # ✅ Thư viện mới cho chat nhanh
 
 # Tải biến môi trường
 load_dotenv()
@@ -15,13 +16,14 @@ CORS(app)
 
 HF_TOKEN = os.getenv("HF_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY") # ✅ Lấy Key từ ENV
 
-# Khởi tạo client OpenAI mới nhất
-client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+# Khởi tạo các AI Clients
+client_openai = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+client_groq = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-# ✅ SỬ DỤNG ENDPOINT TRỰC TIẾP (Bỏ qua Router nếu tài khoản bị giới hạn quyền)
+# Models
 INPAINTING_MODEL = "https://api-inference.huggingface.co/models/runwayml/stable-diffusion-inpainting"
-CHAT_MODEL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2"
 
 def img_to_b64(image):
     buff = io.BytesIO()
@@ -32,11 +34,12 @@ def img_to_b64(image):
 def health():
     return jsonify({
         "status": "ready", 
-        "hf_token_configured": bool(HF_TOKEN),
+        "hf_configured": bool(HF_TOKEN),
         "openai_configured": bool(OPENAI_API_KEY),
-        "api_version": "2026.1.14"
+        "groq_configured": bool(GROQ_API_KEY)
     })
 
+# --- PHẦN 1: TẠO KIỂU TÓC (Dùng Stable Diffusion - Hugging Face) ---
 @app.route('/process-hair', methods=['POST'])
 def process_hair():
     try:
@@ -47,12 +50,12 @@ def process_hair():
         image_url = data.get('image_url')
         hair_style = data.get('prompt', "realistic modern hairstyle")
 
-        # Xử lý ảnh đầu vào
+        # Tải và xử lý ảnh
         response = requests.get(image_url, timeout=15)
         original_img = Image.open(io.BytesIO(response.content)).convert("RGB")
         original_img = ImageOps.fit(original_img, (512, 512))
 
-        # Tạo Mask thông minh
+        # Tạo Mask vùng tóc (Che phần đầu và hai bên)
         mask = Image.new("L", (512, 512), 0)
         draw = ImageDraw.Draw(mask)
         draw.rectangle([0, 0, 512, 240], fill=255)
@@ -81,6 +84,7 @@ def process_hair():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# --- PHẦN 2: TƯ VẤN CHĂM SÓC TÓC (Ưu tiên GROQ siêu tốc) ---
 @app.route('/chat-advisor', methods=['POST'])
 def chat_advisor():
     try:
@@ -89,61 +93,47 @@ def chat_advisor():
         hair_type = data.get('hair_type', 'normal')
         history = data.get('history', [])
 
-        # 1. Thử sử dụng OpenAI trước
-        if client:
+        # 1. ƯU TIÊN SỐ 1: Dùng GROQ (Nhanh nhất, miễn phí ổn định)
+        if client_groq:
             try:
-                system_prompt = f"Bạn là chuyên gia tư vấn tóc chuyên nghiệp tại Việt Nam. Loại tóc khách hàng: {hair_type}."
+                system_prompt = f"Bạn là chuyên gia tư vấn tóc chuyên nghiệp tại Việt Nam. Loại tóc khách hàng: {hair_type}. Trả lời thân thiện bằng tiếng Việt."
                 messages = [{"role": "system", "content": system_prompt}]
+                
+                # Thêm lịch sử chat
                 for msg in history[-5:]:
                     messages.append({"role": msg.get('role', 'user'), "content": msg.get('content', '')})
+                
                 messages.append({"role": "user", "content": user_message})
 
-                chat_res = client.chat.completions.create(
-                    model="gpt-3.5-turbo",
+                chat_res = client_groq.chat.completions.create(
+                    model="llama-3.3-70b-versatile", # Model mạnh nhất của Groq hiện tại
                     messages=messages,
-                    temperature=0.7
+                    temperature=0.7,
+                    max_tokens=800
                 )
                 return jsonify({
                     "response": chat_res.choices[0].message.content,
-                    "model_used": "gpt-3.5-turbo"
+                    "model_used": "groq-llama-3.3"
                 })
             except Exception as e:
-                print(f"OpenAI fallback: {e}")
+                print(f"Groq Error: {e}, falling back to OpenAI/HF")
 
-        # 2. Sử dụng Hugging Face trực tiếp (Tránh lỗi phân quyền Router)
-        if not HF_TOKEN:
-            return jsonify({"error": "AI Config Missing"}), 500
+        # 2. DỰ PHÒNG 1: Dùng OpenAI nếu Groq lỗi
+        if client_openai:
+            try:
+                # ... (logic OpenAI tương tự)
+                res = client_openai.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=[{"role": "user", "content": user_message}]
+                )
+                return jsonify({"response": res.choices[0].message.content, "model_used": "gpt-3.5"})
+            except: pass
 
-        # Cấu trúc Prompt Mistral
-        prompt = f"<s>[INST] Bạn là chuyên gia tư vấn tóc Việt Nam. Trả lời bằng tiếng Việt câu hỏi sau cho khách có tóc {hair_type}: {user_message} [/INST]"
-        
-        headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-        payload = {
-            "inputs": prompt,
-            "parameters": {"max_new_tokens": 600, "temperature": 0.7},
-            "options": {"wait_for_model": True, "use_cache": False} # use_cache: False giúp tránh lấy kết quả cũ lỗi
-        }
-
-        hf_res = requests.post(CHAT_MODEL, headers=headers, json=payload, timeout=60)
-        
-        if hf_res.status_code == 200:
-            result = hf_res.json()
-            # Xử lý chuỗi để lấy phản hồi sạch
-            full_text = result[0].get('generated_text', '')
-            clean_text = full_text.split("[/INST]")[-1].strip()
-            return jsonify({"response": clean_text, "model_used": "mistral-7b"})
-        
-        # Xử lý lỗi 503 chi tiết
-        return jsonify({
-            "response": "AI đang bận khởi động hệ thống. Vui lòng nhắn lại sau 30 giây.",
-            "error": "503_BUSY",
-            "details": hf_res.text
-        }), 503
+        return jsonify({"error": "Tất cả dịch vụ AI đang bận"}), 503
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    # Render yêu cầu chạy trên port được cấp
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)

@@ -3,5 +3,5 @@ flask-cors
 requests
 Pillow
 python-dotenv
-openai>=1.0.0
-gunicorn
+openai
+groq
