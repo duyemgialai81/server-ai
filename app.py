@@ -22,7 +22,8 @@ if OPENAI_API_KEY:
 
 # Models
 INPAINTING_MODEL = "https://api-inference.huggingface.co/models/runwayml/stable-diffusion-inpainting"
-CHAT_MODEL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2"
+# Link Models đúng chuẩn 2026
+CHAT_MODEL = "https://router.huggingface.co/hf-inference/models/mistralai/Mistral-7B-Instruct-v0.2"
 
 def img_to_b64(image):
     buff = io.BytesIO()
