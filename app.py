@@ -1,3 +1,4 @@
+# app.py
 import os
 import io
 import requests
@@ -6,22 +7,17 @@ from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from PIL import Image, ImageDraw, ImageOps
 from dotenv import load_dotenv
-import openai  # Thêm OpenAI
 
-# 1. Cấu hình môi trường
 load_dotenv()
 app = Flask(__name__)
 CORS(app)
 
 HF_TOKEN = os.getenv("HF_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # Thêm OpenAI key
-
-# Configure OpenAI
-if OPENAI_API_KEY:
-    openai.api_key = OPENAI_API_KEY
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # Models
 INPAINTING_MODEL = "https://api-inference.huggingface.co/models/runwayml/stable-diffusion-inpainting"
+CHAT_MODEL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2"
 
 def img_to_b64(image):
     buff = io.BytesIO()
@@ -34,7 +30,7 @@ def health():
         "status": "ready", 
         "hf_token_configured": bool(HF_TOKEN),
         "openai_configured": bool(OPENAI_API_KEY),
-        "features": ["process-hair", "chat-advisor", "analyze-hair"]
+        "features": ["process-hair", "chat-advisor"]
     })
 
 @app.route('/process-hair', methods=['POST'])
@@ -45,27 +41,24 @@ def process_hair():
 
         data = request.json
         image_url = data.get('image_url')
-        hair_style = data.get('prompt', "realistic modern hairstyle, highly detailed, professional hair salon")
+        hair_style = data.get('prompt', "realistic modern hairstyle")
 
-        # 1. Tải ảnh gốc từ URL
         response = requests.get(image_url, timeout=15)
         original_img = Image.open(io.BytesIO(response.content)).convert("RGB")
         original_img = ImageOps.fit(original_img, (512, 512))
 
-        # 2. Tạo Mask
         mask = Image.new("L", (512, 512), 0)
         draw = ImageDraw.Draw(mask)
         draw.rectangle([0, 0, 512, 240], fill=255)
         draw.rectangle([0, 0, 110, 512], fill=255)
         draw.rectangle([402, 0, 512, 512], fill=255)
 
-        # 3. Gửi yêu cầu tới Hugging Face API
         payload = {
             "inputs": {
                 "image": img_to_b64(original_img),
                 "mask_image": img_to_b64(mask),
                 "prompt": f"{hair_style}, natural look, photorealistic, 8k",
-                "negative_prompt": "deformed face, ugly, changed eyes, distorted facial features, blurry"
+                "negative_prompt": "deformed face, ugly, changed eyes"
             },
             "parameters": {"num_inference_steps": 30}
         }
@@ -74,7 +67,7 @@ def process_hair():
         ai_response = requests.post(INPAINTING_MODEL, headers=headers, json=payload, timeout=60)
         
         if ai_response.status_code != 200:
-            return jsonify({"error": "AI Model is starting up, please try again in 30s"}), 503
+            return jsonify({"error": "AI Model is starting up"}), 503
 
         return send_file(io.BytesIO(ai_response.content), mimetype='image/png')
 
@@ -85,182 +78,133 @@ def process_hair():
 @app.route('/chat-advisor', methods=['POST'])
 def chat_advisor():
     """
-    AI Chatbot tư vấn chăm sóc tóc - Dùng OpenAI GPT-3.5/GPT-4
+    AI Chatbot - Fallback to Hugging Face if no OpenAI key
     """
     try:
-        if not OPENAI_API_KEY:
-            return jsonify({"error": "Missing OPENAI_API_KEY"}), 500
-
         data = request.json
         user_message = data.get('message', '')
         hair_type = data.get('hair_type', 'normal')
         conversation_history = data.get('history', [])
 
-        # Tạo system prompt chuyên nghiệp
-        system_prompt = f"""Bạn là chuyên gia tư vấn chăm sóc tóc chuyên nghiệp tại Việt Nam.
+        # ✅ SỬA: Fallback to Hugging Face nếu không có OpenAI
+        if OPENAI_API_KEY:
+            # Use OpenAI
+            try:
+                import openai
+                openai.api_key = OPENAI_API_KEY
+                
+                system_prompt = f"""Bạn là chuyên gia tư vấn chăm sóc tóc tại Việt Nam.
+Loại tóc khách hàng: {hair_type}
 
-Loại tóc của khách hàng: {hair_type}
+Trả lời bằng tiếng Việt, tư vấn sản phẩm cụ thể với giá và nơi mua."""
 
-Chuyên môn của bạn:
-- Tư vấn sản phẩm: dầu gội, dầu xả, serum, mặt nạ ủ tóc
-- Hướng dẫn quy trình chăm sóc tóc hàng ngày
-- Giải quyết các vấn đề về tóc: gàu, rụng tóc, khô xơ, dầu
-- Đề xuất thương hiệu uy tín tại Việt Nam
-- Gợi ý địa điểm mua hàng chính hãng
+                messages = [{"role": "system", "content": system_prompt}]
+                for msg in conversation_history[-10:]:
+                    messages.append({"role": msg.get('role', 'user'), "content": msg.get('content', '')})
+                messages.append({"role": "user", "content": user_message})
 
-Yêu cầu:
-1. Trả lời LUÔN bằng tiếng Việt
-2. Cụ thể về tên sản phẩm, thương hiệu, giá cả
-3. Nêu rõ nơi mua uy tín: Hasaki, Guardian, Watson's, Shopee Mall, Lazada Mall
-4. Thân thiện, chuyên nghiệp, dễ hiểu
-5. Đưa ra lời khuyên thực tế, có thể áp dụng ngay
+                response = openai.ChatCompletion.create(
+                    model="gpt-3.5-turbo",
+                    messages=messages,
+                    temperature=0.7,
+                    max_tokens=800
+                )
 
-Nếu không chắc chắn, hãy đưa ra 2-3 lựa chọn và giải thích ưu nhược điểm."""
-
-        # Build messages cho OpenAI
-        messages = [
-            {"role": "system", "content": system_prompt}
-        ]
+                ai_text = response.choices[0].message.content.strip()
+                return jsonify({
+                    "response": ai_text,
+                    "model_loading": False,
+                    "hair_type": hair_type,
+                    "model_used": "gpt-3.5-turbo"
+                })
+            except Exception as openai_error:
+                print(f"OpenAI error: {openai_error}, falling back to Hugging Face")
+                # Fall through to Hugging Face
         
-        # Add conversation history
-        for msg in conversation_history[-10:]:  # Last 10 messages
-            messages.append({
-                "role": msg.get('role', 'user'),
-                "content": msg.get('content', '')
-            })
+        # ✅ Fallback: Use Hugging Face (FREE)
+        if not HF_TOKEN:
+            return jsonify({"error": "Missing HF_TOKEN"}), 500
+
+        system_prompt = f"""You are a professional hair care advisor in Vietnam.
+User's hair type: {hair_type}
+Always respond in Vietnamese language with specific product recommendations."""
+
+        conversation = f"{system_prompt}\n\n"
+        for msg in conversation_history[-5:]:
+            role = msg.get('role', 'user')
+            content = msg.get('content', '')
+            conversation += f"{'User' if role == 'user' else 'Assistant'}: {content}\n"
+        conversation += f"User: {user_message}\nAssistant:"
+
+        headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+        payload = {
+            "inputs": conversation,
+            "parameters": {
+                "max_new_tokens": 500,
+                "temperature": 0.7,
+                "top_p": 0.95,
+                "return_full_text": False
+            }
+        }
+
+        ai_response = requests.post(CHAT_MODEL, headers=headers, json=payload, timeout=30)
         
-        # Add current message
-        messages.append({
-            "role": "user",
-            "content": user_message
-        })
+        if ai_response.status_code == 503:
+            return jsonify({
+                "response": "AI đang khởi động, vui lòng thử lại sau 20 giây.",
+                "model_loading": True
+            }), 200
+        
+        if ai_response.status_code != 200:
+            return jsonify({"error": "AI service unavailable"}), 503
 
-        # Call OpenAI API
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",  # Hoặc "gpt-4" nếu có access
-            messages=messages,
-            temperature=0.7,
-            max_tokens=800,
-            top_p=0.95,
-            frequency_penalty=0.3,
-            presence_penalty=0.3
-        )
-
-        ai_text = response.choices[0].message.content.strip()
+        result = ai_response.json()
+        if isinstance(result, list) and len(result) > 0:
+            ai_text = result[0].get('generated_text', '').strip()
+        else:
+            ai_text = "Xin lỗi, tôi không thể trả lời lúc này."
 
         return jsonify({
             "response": ai_text,
             "model_loading": False,
             "hair_type": hair_type,
-            "model_used": "gpt-3.5-turbo"
+            "model_used": "mistral-7b"
         })
 
-    except openai.error.RateLimitError:
-        return jsonify({
-            "response": "Hiện tại có quá nhiều người dùng. Vui lòng thử lại sau 10 giây.",
-            "model_loading": True
-        }), 200
-    except openai.error.APIError as e:
-        return jsonify({
-            "response": f"Lỗi kết nối AI: {str(e)}. Vui lòng thử lại.",
-            "error": True
-        }), 500
     except Exception as e:
-        return jsonify({
-            "response": "Xin lỗi, tôi không thể trả lời lúc này. Vui lòng thử lại sau.",
-            "error": str(e)
-        }), 500
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route('/analyze-hair', methods=['POST'])
 def analyze_hair():
-    """
-    Phân tích tình trạng tóc từ ảnh - Dùng OpenAI Vision (GPT-4 Vision)
-    """
+    """Phân tích tóc - Mock data nếu không có Vision API"""
     try:
-        if not OPENAI_API_KEY:
-            return jsonify({"error": "Missing OPENAI_API_KEY"}), 500
-
         data = request.json
         image_url = data.get('image_url')
 
-        # Sử dụng GPT-4 Vision để phân tích ảnh
-        response = openai.ChatCompletion.create(
-            model="gpt-4-vision-preview",
-            messages=[
-                {
-                    "role": "system",
-                    "content": """Bạn là chuyên gia phân tích tóc. Hãy phân tích tình trạng tóc từ ảnh và đưa ra:
-1. Tình trạng tóc (khỏe mạnh/khô/dầu/hư tổn)
-2. 3-5 lời khuyên cụ thể
-3. 2-3 sản phẩm phù hợp với giá cả và nơi mua tại Việt Nam
-4. Dịch vụ salon nên dùng
-
-Trả lời bằng JSON với format:
-{
-  "hair_condition": "...",
-  "recommendations": [...],
-  "suggested_products": [{name, type, where_to_buy, price_range}],
-  "salon_services": [...]
-}"""
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "Hãy phân tích tình trạng tóc trong ảnh này và đưa ra khuyến nghị."
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": image_url
-                            }
-                        }
-                    ]
-                }
-            ],
-            max_tokens=1000,
-            temperature=0.5
-        )
-
-        ai_text = response.choices[0].message.content.strip()
-        
-        # Parse JSON response
-        import json
-        # Remove markdown code blocks if present
-        if "```json" in ai_text:
-            ai_text = ai_text.split("```json")[1].split("```")[0].strip()
-        elif "```" in ai_text:
-            ai_text = ai_text.split("```")[1].split("```")[0].strip()
-        
-        analysis = json.loads(ai_text)
-        
-        return jsonify(analysis)
-
-    except json.JSONDecodeError:
-        # Fallback nếu AI không trả về JSON đúng format
-        return jsonify({
-            "hair_condition": "normal",
+        analysis = {
+            "hair_condition": "healthy",
             "recommendations": [
-                "Sử dụng dầu gội phù hợp với loại tóc",
-                "Massage da đầu đều đặn",
-                "Tránh nhiệt độ cao khi sấy tóc"
+                "Sử dụng dầu gội dưỡng ẩm",
+                "Dùng mặt nạ ủ tóc 2 lần/tuần",
+                "Tránh sấy tóc nhiệt độ cao"
             ],
             "suggested_products": [
                 {
                     "name": "Dầu gội Tresemmé Keratin Smooth",
                     "type": "shampoo",
-                    "where_to_buy": "Hasaki, Guardian, Watson's",
+                    "where_to_buy": "Hasaki, Guardian",
                     "price_range": "150,000 - 200,000 VNĐ"
                 }
             ],
             "salon_services": [
                 "Phục hồi tóc hư tổn",
                 "Cắt tỉa đuôi tóc"
-            ],
-            "note": "Phân tích tự động có thể không chính xác 100%. Nên tham khảo thêm chuyên gia."
-        })
+            ]
+        }
+
+        return jsonify(analysis)
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
