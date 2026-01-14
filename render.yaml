@@ -1,9 +1,16 @@
 services:
   - type: web
-    name: ai-hairstyle-api
-    env: python
-    buildCommand: pip install -r requirements.txt
+    name: server-ai
+    runtime: python
+    region: singapore
+    plan: free
+    branch: main
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt --use-pep517
     startCommand: gunicorn app:app
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.0
+        value: 3.11.9
+      - key: HF_TOKEN
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
