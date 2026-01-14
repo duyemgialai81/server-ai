@@ -5,3 +5,4 @@ Pillow
 python-dotenv
 openai
 groq
+gunicorn
