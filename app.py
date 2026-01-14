@@ -1,4 +1,3 @@
-# app.py
 import os
 import io
 import requests
@@ -15,7 +14,7 @@ CORS(app)
 HF_TOKEN = os.getenv("HF_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# Models
+# Link Models
 INPAINTING_MODEL = "https://api-inference.huggingface.co/models/runwayml/stable-diffusion-inpainting"
 CHAT_MODEL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2"
 
@@ -28,186 +27,104 @@ def img_to_b64(image):
 def health():
     return jsonify({
         "status": "ready", 
-        "hf_token_configured": bool(HF_TOKEN),
-        "openai_configured": bool(OPENAI_API_KEY),
-        "features": ["process-hair", "chat-advisor"]
+        "hf_configured": bool(HF_TOKEN),
+        "openai_configured": bool(OPENAI_API_KEY)
     })
 
+# 1. CHỨC NĂNG TẠO KIỂU TÓC (IMAGE AI)
 @app.route('/process-hair', methods=['POST'])
 def process_hair():
     try:
         if not HF_TOKEN:
-            return jsonify({"error": "Missing HF_TOKEN"}), 500
+            return jsonify({"error": "Thiếu HF_TOKEN"}), 500
 
         data = request.json
         image_url = data.get('image_url')
         hair_style = data.get('prompt', "realistic modern hairstyle")
 
+        # Tải ảnh từ URL
         response = requests.get(image_url, timeout=15)
         original_img = Image.open(io.BytesIO(response.content)).convert("RGB")
         original_img = ImageOps.fit(original_img, (512, 512))
 
+        # Tạo mặt nạ (Mask) vùng tóc
         mask = Image.new("L", (512, 512), 0)
         draw = ImageDraw.Draw(mask)
-        draw.rectangle([0, 0, 512, 240], fill=255)
-        draw.rectangle([0, 0, 110, 512], fill=255)
-        draw.rectangle([402, 0, 512, 512], fill=255)
+        draw.rectangle([0, 0, 512, 240], fill=255) # Vùng trên đầu
+        draw.rectangle([0, 0, 110, 512], fill=255) # Vùng bên trái
+        draw.rectangle([402, 0, 512, 512], fill=255) # Vùng bên phải
 
         payload = {
             "inputs": {
                 "image": img_to_b64(original_img),
                 "mask_image": img_to_b64(mask),
                 "prompt": f"{hair_style}, natural look, photorealistic, 8k",
-                "negative_prompt": "deformed face, ugly, changed eyes"
+                "negative_prompt": "deformed face, ugly, changed eyes, bad anatomy"
             },
-            "parameters": {"num_inference_steps": 30}
+            "parameters": {"num_inference_steps": 30},
+            "options": {"wait_for_model": True} # ✅ QUAN TRỌNG: Đợi model khởi động
         }
 
         headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-        ai_response = requests.post(INPAINTING_MODEL, headers=headers, json=payload, timeout=60)
+        ai_response = requests.post(INPAINTING_MODEL, headers=headers, json=payload, timeout=90)
         
         if ai_response.status_code != 200:
-            return jsonify({"error": "AI Model is starting up"}), 503
+            return jsonify({"error": "AI tạo ảnh đang khởi động, vui lòng thử lại sau 30s"}), 503
 
         return send_file(io.BytesIO(ai_response.content), mimetype='image/png')
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
+# 2. CHỨC NĂNG TƯ VẤN CHĂM SÓC TÓC (CHAT AI)
 @app.route('/chat-advisor', methods=['POST'])
 def chat_advisor():
-    """
-    AI Chatbot - Fallback to Hugging Face if no OpenAI key
-    """
     try:
         data = request.json
         user_message = data.get('message', '')
         hair_type = data.get('hair_type', 'normal')
-        conversation_history = data.get('history', [])
+        history = data.get('history', [])
 
-        # ✅ SỬA: Fallback to Hugging Face nếu không có OpenAI
+        # Ưu tiên sử dụng OpenAI nếu có Key
         if OPENAI_API_KEY:
-            # Use OpenAI
             try:
                 import openai
-                openai.api_key = OPENAI_API_KEY
-                
-                system_prompt = f"""Bạn là chuyên gia tư vấn chăm sóc tóc tại Việt Nam.
-Loại tóc khách hàng: {hair_type}
-
-Trả lời bằng tiếng Việt, tư vấn sản phẩm cụ thể với giá và nơi mua."""
-
-                messages = [{"role": "system", "content": system_prompt}]
-                for msg in conversation_history[-10:]:
-                    messages.append({"role": msg.get('role', 'user'), "content": msg.get('content', '')})
+                client = openai.OpenAI(api_key=OPENAI_API_KEY)
+                messages = [{"role": "system", "content": f"Bạn là chuyên gia tư vấn tóc. Loại tóc: {hair_type}. Trả lời bằng tiếng Việt."}]
+                for m in history[-5:]: messages.append(m)
                 messages.append({"role": "user", "content": user_message})
+                
+                res = client.chat.completions.create(model="gpt-3.5-turbo", messages=messages)
+                return jsonify({"response": res.choices[0].message.content, "model": "gpt-3.5"})
+            except: pass 
 
-                response = openai.ChatCompletion.create(
-                    model="gpt-3.5-turbo",
-                    messages=messages,
-                    temperature=0.7,
-                    max_tokens=800
-                )
-
-                ai_text = response.choices[0].message.content.strip()
-                return jsonify({
-                    "response": ai_text,
-                    "model_loading": False,
-                    "hair_type": hair_type,
-                    "model_used": "gpt-3.5-turbo"
-                })
-            except Exception as openai_error:
-                print(f"OpenAI error: {openai_error}, falling back to Hugging Face")
-                # Fall through to Hugging Face
-        
-        # ✅ Fallback: Use Hugging Face (FREE)
+        # Dự phòng: Sử dụng Hugging Face (Mistral)
         if not HF_TOKEN:
-            return jsonify({"error": "Missing HF_TOKEN"}), 500
+            return jsonify({"error": "Thiếu token AI"}), 500
 
-        system_prompt = f"""You are a professional hair care advisor in Vietnam.
-User's hair type: {hair_type}
-Always respond in Vietnamese language with specific product recommendations."""
-
-        conversation = f"{system_prompt}\n\n"
-        for msg in conversation_history[-5:]:
-            role = msg.get('role', 'user')
-            content = msg.get('content', '')
-            conversation += f"{'User' if role == 'user' else 'Assistant'}: {content}\n"
-        conversation += f"User: {user_message}\nAssistant:"
+        # Format prompt cho Mistral 7B
+        prompt = f"<s>[INST] Bạn là chuyên gia tóc tại Việt Nam. Khách có tóc {hair_type}. Trả lời ngắn gọn bằng tiếng Việt: {user_message} [/INST]"
 
         headers = {"Authorization": f"Bearer {HF_TOKEN}"}
         payload = {
-            "inputs": conversation,
-            "parameters": {
-                "max_new_tokens": 500,
-                "temperature": 0.7,
-                "top_p": 0.95,
-                "return_full_text": False
-            }
+            "inputs": prompt,
+            "parameters": {"max_new_tokens": 500, "temperature": 0.7},
+            "options": {"wait_for_model": True} # ✅ QUAN TRỌNG: Đợi model khởi động
         }
 
-        ai_response = requests.post(CHAT_MODEL, headers=headers, json=payload, timeout=30)
+        ai_response = requests.post(CHAT_MODEL, headers=headers, json=payload, timeout=60)
         
-        if ai_response.status_code == 503:
-            return jsonify({
-                "response": "AI đang khởi động, vui lòng thử lại sau 20 giây.",
-                "model_loading": True
-            }), 200
+        if ai_response.status_code == 200:
+            result = ai_response.json()
+            full_text = result[0].get('generated_text', '')
+            # Lấy phần trả lời sau thẻ [/INST]
+            clean_text = full_text.split("[/INST]")[-1].strip()
+            return jsonify({"response": clean_text, "model": "mistral-7b"})
         
-        if ai_response.status_code != 200:
-            return jsonify({"error": "AI service unavailable"}), 503
-
-        result = ai_response.json()
-        if isinstance(result, list) and len(result) > 0:
-            ai_text = result[0].get('generated_text', '').strip()
-        else:
-            ai_text = "Xin lỗi, tôi không thể trả lời lúc này."
-
-        return jsonify({
-            "response": ai_text,
-            "model_loading": False,
-            "hair_type": hair_type,
-            "model_used": "mistral-7b"
-        })
+        return jsonify({"response": "AI đang khởi động, hãy nhắn lại sau 20 giây.", "loading": True}), 503
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-
-@app.route('/analyze-hair', methods=['POST'])
-def analyze_hair():
-    """Phân tích tóc - Mock data nếu không có Vision API"""
-    try:
-        data = request.json
-        image_url = data.get('image_url')
-
-        analysis = {
-            "hair_condition": "healthy",
-            "recommendations": [
-                "Sử dụng dầu gội dưỡng ẩm",
-                "Dùng mặt nạ ủ tóc 2 lần/tuần",
-                "Tránh sấy tóc nhiệt độ cao"
-            ],
-            "suggested_products": [
-                {
-                    "name": "Dầu gội Tresemmé Keratin Smooth",
-                    "type": "shampoo",
-                    "where_to_buy": "Hasaki, Guardian",
-                    "price_range": "150,000 - 200,000 VNĐ"
-                }
-            ],
-            "salon_services": [
-                "Phục hồi tóc hư tổn",
-                "Cắt tỉa đuôi tóc"
-            ]
-        }
-
-        return jsonify(analysis)
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
