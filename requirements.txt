@@ -1,7 +1,7 @@
-Flask==3.0.3
-Flask-CORS==4.0.1
-Pillow==10.4.0
-requests==2.31.0
-gunicorn==22.0.0
-python-dotenv==1.0.1
-openai==1.54.0
+flask
+flask-cors
+requests
+Pillow
+python-dotenv
+openai>=1.0.0
+gunicorn
